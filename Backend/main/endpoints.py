@@ -295,7 +295,7 @@ async def submit_answer(
     materials_context = await get_subject_materials(db, exam_session.subject)
 
     # Проверяем, не уходит ли студент от темы
-    off_topic_check = check_if_off_topic(
+    off_topic_check =await check_if_off_topic(
         transcribed_text, exam_session.subject, materials_context)
 
     # Анализируем ответ с помощью OpenAI
