@@ -1,6 +1,5 @@
-import requests
 import os
-from main.config import Settings
+from deepgram import DeepgramClient
 
 
 async def transcribe_audio(audio_url: str) -> str:
@@ -17,44 +16,26 @@ async def transcribe_audio(audio_url: str) -> str:
     if not deepgram_api_key:
         raise ValueError("DEEPGRAM_API_KEY not found in environment variables")
 
-    # Скачиваем аудио файл
     try:
-        response = requests.get(audio_url, timeout=30)
-        response.raise_for_status()
-        audio_data = response.content
-    except requests.exceptions.RequestException as e:
-        raise ValueError(f"Failed to download audio from URL: {str(e)}")
+        # Инициализируем клиент Deepgram
+        deepgram = DeepgramClient(api_key=deepgram_api_key)
 
-    # Отправляем на транскрипцию
-    url = "https://api.deepgram.com/v1/listen"
-    headers = {
-        "Authorization": f"Token {deepgram_api_key}"
-    }
+        # Транскрибируем аудио по URL
+        response = deepgram.listen.v1.media.transcribe_url(
+            url=audio_url,
+            model="nova-2",
+            language="ru",
+            smart_format=True,
+        )
 
-    files = {
-        "audio": ("audio.ogg", audio_data, "audio/ogg")
-    }
+        # Извлекаем транскрипт из ответа
+        if response.results and response.results.channels:
+            if len(response.results.channels) > 0:
+                channel = response.results.channels[0]
+                if channel.alternatives and len(channel.alternatives) > 0:
+                    print(channel.alternatives[0].transcript)
+                    return channel.alternatives[0].transcript
 
-    params = {
-        "model": "nova-2",
-        "language": "ru",
-        "punctuate": "true",
-        "diarize": "false"
-    }
-
-    try:
-        response = requests.post(url, headers=headers,
-                                 files=files, params=params, timeout=60)
-        response.raise_for_status()
-        result = response.json()
-    except requests.exceptions.RequestException as e:
+        return ""
+    except Exception as e:
         raise ValueError(f"Failed to transcribe audio with Deepgram: {str(e)}")
-
-    # Извлекаем текст из результата
-    if "results" in result and "channels" in result["results"]:
-        if len(result["results"]["channels"]) > 0:
-            if "alternatives" in result["results"]["channels"][0]:
-                if len(result["results"]["channels"][0]["alternatives"]) > 0:
-                    return result["results"]["channels"][0]["alternatives"][0]["transcript"]
-
-    return ""

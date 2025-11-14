@@ -547,7 +547,7 @@ async def send_study_message(
     materials_context = await get_subject_materials(db, study_session.subject)
 
     # Проверяем, не уходит ли студент от темы
-    off_topic_check = check_if_off_topic(
+    off_topic_check = await check_if_off_topic(
         request.message, study_session.subject, materials_context)
 
     # Если уходит от темы, возвращаем redirect_message
