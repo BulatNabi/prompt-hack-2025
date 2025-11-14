@@ -10,6 +10,7 @@ RUN apt-get update \
         build-essential \
         git \
         postgresql-client \
+        curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

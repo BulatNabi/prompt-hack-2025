@@ -3,15 +3,101 @@ from typing import List, Dict, Optional
 from main.config import Settings
 
 
-def get_emotion_voice_mapping(emotion: str) -> str:
-    """Маппинг эмоций на голоса Yandex SpeechKit"""
-    mapping = {
-        "neutral": "jane",
-        "happy": "jane",
-        "disappointed": "omazh",
-        "angry": "zahar"
-    }
-    return mapping.get(emotion, "jane")
+async def detect_teacher_gender(teacher_name: str) -> str:
+    """
+    Определяет пол преподавателя по имени с помощью OpenAI
+
+    Args:
+        teacher_name: Имя преподавателя (например, "Иван Петров" или "Мария Иванова")
+
+    Returns:
+        str: "male" или "female"
+    """
+    # Простое правило для русских имен (можно улучшить)
+    female_endings = ["а", "я", "ь"]
+    first_name = teacher_name.split()[0] if teacher_name else ""
+
+    # Если имя заканчивается на типичные женские окончания
+    if first_name and first_name[-1].lower() in female_endings:
+        return "female"
+
+    # Используем OpenAI для более точного определения
+    try:
+        prompt = f"""Определи пол человека по имени. Верни только "male" или "female" без дополнительных объяснений.
+
+Имя: {teacher_name}
+
+Пол:"""
+
+        response = Settings.client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Ты помощник, который определяет пол по имени. Отвечай только 'male' или 'female'."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.1,
+            max_tokens=10
+        )
+
+        result = response.choices[0].message.content.strip().lower()
+        if "female" in result or "жен" in result.lower():
+            return "female"
+        elif "male" in result or "муж" in result.lower():
+            return "male"
+        else:
+            # По умолчанию, если не удалось определить
+            return "male"
+    except Exception:
+        # В случае ошибки используем простое правило
+        if first_name and first_name[-1].lower() in female_endings:
+            return "female"
+        return "male"
+
+
+def get_voice_by_gender_and_emotion(gender: str, emotion: str) -> str:
+    """
+    Выбирает голос Yandex SpeechKit на основе пола и эмоции
+
+    Args:
+        gender: "male" или "female"
+        emotion: "neutral", "happy", "disappointed", "angry"
+
+    Returns:
+        str: Имя голоса для Yandex SpeechKit
+    """
+    # Женские голоса: jane, omazh, alena, filipp
+    # Мужские голоса: zahar, ermil
+
+    if gender == "female":
+        mapping = {
+            "neutral": "jane",
+            "happy": "jane",
+            "disappointed": "omazh",
+            "angry": "omazh"
+        }
+    else:  # male
+        mapping = {
+            "neutral": "zahar",
+            "happy": "zahar",
+            "disappointed": "ermil",
+            "angry": "zahar"
+        }
+
+    return mapping.get(emotion, "jane" if gender == "female" else "zahar")
+
+
+def get_emotion_voice_mapping(emotion: str, gender: str = "female") -> str:
+    """
+    Маппинг эмоций на голоса Yandex SpeechKit с учетом пола
+
+    Args:
+        emotion: Эмоция преподавателя
+        gender: Пол преподавателя ("male" или "female")
+
+    Returns:
+        str: Имя голоса
+    """
+    return get_voice_by_gender_and_emotion(gender, emotion)
 
 
 def get_emotion_emotion_mapping(emotion: str) -> str:

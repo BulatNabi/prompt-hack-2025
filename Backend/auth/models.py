@@ -56,6 +56,8 @@ class ExamSession(Base):
     teacher_name = Column(String, nullable=False)
     subject = Column(String, nullable=False)
     teacher_description = Column(Text, nullable=False)
+    # male, female
+    teacher_gender = Column(String, default="male", nullable=False)
     # in_progress, completed, failed
     status = Column(String, default="in_progress", nullable=False)
     # neutral, happy, disappointed, angry
@@ -78,6 +80,8 @@ class StudySession(Base):
     teacher_name = Column(String, nullable=False)
     subject = Column(String, nullable=False)
     teacher_description = Column(Text, nullable=False)
+    # male, female
+    teacher_gender = Column(String, default="male", nullable=False)
     status = Column(String, default="active",
                     nullable=False)  # active, completed
     context_history = Column(JSON, default=list)  # История диалога для OpenAI

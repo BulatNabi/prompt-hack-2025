@@ -3,19 +3,33 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from auth.models import SubjectMaterials
 from main.config import Settings
+from exam.qdrant_service import qdrant_service
 
 
-async def get_subject_materials(db: AsyncSession, subject: str) -> str:
+async def get_subject_materials(db: AsyncSession, subject: str, query: Optional[str] = None) -> str:
     """
-    Получает материалы по предмету из базы данных
+    Получает материалы по предмету из Qdrant (векторный поиск)
 
     Args:
         db: Сессия базы данных
         subject: Название предмета
+        query: Поисковый запрос для семантического поиска (опционально)
 
     Returns:
         str: Контекст материалов
     """
+    # Используем Qdrant для получения материалов
+    try:
+        materials = qdrant_service.get_subject_materials(
+            subject, query=query, limit=10)
+        if materials:
+            return materials
+    except Exception as e:
+        print(f"Error getting materials from Qdrant: {e}")
+        # Fallback на старую БД, если Qdrant недоступен
+        pass
+
+    # Fallback: получаем материалы из БД (для обратной совместимости)
     result = await db.execute(
         select(SubjectMaterials).where(SubjectMaterials.subject == subject)
     )
@@ -30,13 +44,24 @@ async def get_subject_materials(db: AsyncSession, subject: str) -> str:
 
 async def save_subject_materials(db: AsyncSession, subject: str, content: str):
     """
-    Сохраняет материалы по предмету в базу данных
+    Сохраняет материалы по предмету в базу данных и Qdrant
 
     Args:
         db: Сессия базы данных
         subject: Название предмета
         content: Содержание материалов
     """
+    # Сохраняем в Qdrant
+    try:
+        qdrant_service.add_document(
+            subject=subject,
+            content=content,
+            metadata={"source": "text_upload"}
+        )
+    except Exception as e:
+        print(f"Error saving to Qdrant: {e}")
+
+    # Также сохраняем в БД для обратной совместимости
     material = SubjectMaterials(subject=subject, content=content)
     db.add(material)
     await db.commit()
@@ -44,34 +69,81 @@ async def save_subject_materials(db: AsyncSession, subject: str, content: str):
     return material
 
 
+async def save_pdf_to_qdrant(
+    subject: str,
+    pdf_pages: List[str],
+    metadata: Optional[dict] = None
+) -> List[str]:
+    """
+    Сохраняет PDF документ в Qdrant, разбивая на чанки
+
+    Args:
+        subject: Предмет
+        pdf_pages: Список страниц PDF
+        metadata: Дополнительные метаданные
+
+    Returns:
+        List[str]: Список ID добавленных документов
+    """
+    from exam.pdf_parser import split_text_into_chunks
+    import uuid
+
+    document_ids = []
+
+    for page_num, page_text in enumerate(pdf_pages):
+        # Разбиваем страницу на чанки
+        chunks = split_text_into_chunks(
+            page_text, chunk_size=1000, overlap=200)
+
+        for chunk_num, chunk in enumerate(chunks):
+            chunk_metadata = {
+                "source": "pdf",
+                "page": page_num + 1,
+                "chunk": chunk_num + 1,
+                **(metadata or {})
+            }
+
+            document_id = qdrant_service.add_document(
+                subject=subject,
+                content=chunk,
+                document_id=str(uuid.uuid4()),
+                metadata=chunk_metadata
+            )
+            document_ids.append(document_id)
+
+    return document_ids
+
+
 async def build_rag_context(
     db: AsyncSession,
     subject: str,
-    additional_materials: Optional[List[str]] = None
+    additional_materials: Optional[List[str]] = None,
+    query: Optional[str] = None
 ) -> str:
     """
-    Строит контекст для RAG из материалов по предмету
+    Строит контекст для RAG из материалов по предмету с использованием Qdrant
 
     Args:
         db: Сессия базы данных
         subject: Название предмета
         additional_materials: Дополнительные материалы (если переданы при старте экзамена)
+        query: Поисковый запрос для семантического поиска (опционально)
 
     Returns:
         str: Контекст для использования в промптах
     """
-    # Получаем материалы из БД
-    db_materials = await get_subject_materials(db, subject)
+    # Получаем материалы из Qdrant (с семантическим поиском, если есть запрос)
+    qdrant_materials = await get_subject_materials(db, subject, query=query)
 
     # Объединяем с дополнительными материалами
     all_materials = []
-    if db_materials:
-        all_materials.append(db_materials)
+    if qdrant_materials:
+        all_materials.append(qdrant_materials)
 
     if additional_materials:
         all_materials.extend(additional_materials)
 
-    # Если есть новые материалы, сохраняем их в БД
+    # Если есть новые материалы, сохраняем их в Qdrant и БД
     if additional_materials and len(additional_materials) > 0:
         for material in additional_materials:
             if material and material.strip():  # Проверяем, что материал не пустой

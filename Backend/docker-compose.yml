@@ -10,6 +10,10 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      qdrant:
+        condition: service_started
+    environment:
+      - QDRANT_HOST=qdrant
     env_file:
       - ./.env
     restart: unless-stopped
@@ -20,14 +24,19 @@ services:
           echo '⏳ Waiting for PostgreSQL...';
           sleep 2;
         done;
-        echo '✅ PostgreSQL ready! Running migrations...';
+        echo '✅ PostgreSQL ready!';
+        until curl -f http://qdrant:6333/healthz > /dev/null 2>&1; do
+          echo '⏳ Waiting for Qdrant...';
+          sleep 2;
+        done;
+        echo '✅ Qdrant ready! Running migrations...';
         alembic upgrade head;
         echo '✅ Migrations completed! Starting application...';
         uvicorn main.endpoints:app --host 0.0.0.0 --port 8000;
       "
 
   db:
-    image: postgres
+    image: postgres:17
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
@@ -46,7 +55,24 @@ services:
       retries: 5
       start_period: 30s
 
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "${QDRANT_PORT}:6333"
+      - "${QDRANT_GRPC_PORT}:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
 volumes:
   postgres_data:
+    driver: local
+  qdrant_data:
     driver: local
 

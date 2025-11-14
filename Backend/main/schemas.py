@@ -155,3 +155,12 @@ class StudyResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# PDF upload schemas
+class PDFUploadResponse(BaseModel):
+    subject: str
+    document_ids: List[str]
+    pages_count: int
+    chunks_count: int
+    message: str

@@ -1,8 +1,9 @@
 from sqlalchemy import select
 from exam.deepgram import transcribe_audio
 from exam.speechkit import text_to_speech_url
-from exam.openai_service import generate_first_question, analyze_answer, generate_next_question, get_emotion_voice_mapping, get_emotion_emotion_mapping
-from exam.rag import build_rag_context, get_subject_materials
+from exam.openai_service import generate_first_question, analyze_answer, generate_next_question, get_emotion_voice_mapping, get_emotion_emotion_mapping, detect_teacher_gender
+from exam.rag import build_rag_context, get_subject_materials, save_pdf_to_qdrant
+from exam.pdf_parser import parse_pdf_from_file, parse_pdf_from_url
 from exam.study_service import generate_teacher_response, check_if_off_topic
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -11,7 +12,8 @@ from main.schemas import (
     VideoRequestDto, CutVideoRequestDto, AudioRequestDto, UserCreate, Token,
     RefreshTokenRequest, UserResponse, SubscriptionUpdate, UserLogin,
     ExamStartRequest, QuestionResponse, AnswerRequest, AnswerResponse, ExamStatusResponse,
-    StudyStartRequest, StudyMessageRequest, StudyResponse, StudyMessageResponse
+    StudyStartRequest, StudyMessageRequest, StudyResponse, StudyMessageResponse,
+    PDFUploadResponse
 )
 from typing import List
 from botocore.exceptions import NoCredentialsError, ClientError
@@ -73,46 +75,6 @@ async def upload(file: UploadFile = File(...), current_user: User = Depends(get_
     except (NoCredentialsError, ClientError) as e:
         raise HTTPException(status_code=500, detail=f"S3 error: {str(e)}")
 
-
-@app.post("/cut")
-async def cut_video(request: CutVideoRequestDto, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    result = await cut_video_fn(request.video_url, request.start, request.end)
-    current_user.video_urls.append(result["filename"])
-    await db.commit()
-    return result
-
-
-@app.post("/translate")
-async def translate_video(request: VideoRequestDto, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    if request.text is None:
-        result = await translate_video_without_text(request.video_url, request.params)
-    else:
-        result = await translate_video_with_text(request.video_url, request.text, request.params)
-
-    current_user.video_urls.append(result["filename"])
-    await db.commit()
-    return result
-
-
-@app.post("/make-subs")
-async def subtitles_video(request: VideoRequestDto, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    if request.text is None:
-        return await subtitles_video_without_text(request.video_url, request.params)
-    else:
-        return await subtitles_video_with_text(request.video_url, request.text, request.params)
-
-
-@app.post("/translate_audio")
-async def translate_audio(request: AudioRequestDto, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    result = None
-    if request.text is None:
-        result = await translate_audio_without_text(request.audio_url, request.params)
-    else:
-        result = await translate_audio_with_text(request.audio_url, request.text, request.params)
-
-    current_user.video_urls.append(result["filename"])
-    await db.commit()
-    return result
 
 
 @app.post("/register", response_model=UserResponse)
@@ -230,6 +192,9 @@ async def start_exam(
     """
     Запускает экзамен для студента
     """
+    # Определяем пол преподавателя
+    teacher_gender = await detect_teacher_gender(request.teacher_name)
+
     # Строим RAG контекст из материалов
     materials_context = await build_rag_context(db, request.subject, request.materials)
 
@@ -247,6 +212,7 @@ async def start_exam(
         teacher_name=request.teacher_name,
         subject=request.subject,
         teacher_description=request.teacher_description,
+        teacher_gender=teacher_gender,
         context_history=[
             {"role": "system", "content": f"Преподаватель: {request.teacher_name}, Предмет: {request.subject}"},
             {"role": "assistant", "content": question_data["question"]}
@@ -260,7 +226,8 @@ async def start_exam(
     question_text = question_data["question"]
     question_audio_url = await text_to_speech_url(
         question_text,
-        voice=get_emotion_voice_mapping(exam_session.teacher_mood),
+        voice=get_emotion_voice_mapping(
+            exam_session.teacher_mood, exam_session.teacher_gender),
         emotion=get_emotion_emotion_mapping(exam_session.teacher_mood)
     )
 
@@ -373,7 +340,8 @@ async def submit_answer(
         followup_text = analysis["followup_question"]
         followup_audio_url = await text_to_speech_url(
             followup_text,
-            voice=get_emotion_voice_mapping(exam_session.teacher_mood),
+            voice=get_emotion_voice_mapping(
+                exam_session.teacher_mood, exam_session.teacher_gender),
             emotion=get_emotion_emotion_mapping(exam_session.teacher_mood)
         )
 
@@ -416,7 +384,8 @@ async def submit_answer(
         next_question_text = next_question_data["question"]
         next_question_audio_url = await text_to_speech_url(
             next_question_text,
-            voice=get_emotion_voice_mapping(exam_session.teacher_mood),
+            voice=get_emotion_voice_mapping(
+                exam_session.teacher_mood, exam_session.teacher_gender),
             emotion=get_emotion_emotion_mapping(exam_session.teacher_mood)
         )
 
@@ -507,6 +476,9 @@ async def start_study(
     """
     Запускает сессию подготовки к экзамену
     """
+    # Определяем пол преподавателя
+    teacher_gender = await detect_teacher_gender(request.teacher_name)
+
     # Строим RAG контекст из материалов
     materials_context = await build_rag_context(db, request.subject, request.materials)
 
@@ -516,6 +488,7 @@ async def start_study(
         teacher_name=request.teacher_name,
         subject=request.subject,
         teacher_description=request.teacher_description,
+        teacher_gender=teacher_gender,
         context_history=[
             {"role": "system", "content": f"Преподаватель: {request.teacher_name}, Предмет: {request.subject}"},
             {"role": "assistant", "content": f"Здравствуй! Я {request.teacher_name}, помогу тебе подготовиться к экзамену по {request.subject}. Задавай вопросы, и я объясню материал."}
@@ -644,3 +617,139 @@ async def get_study_messages(
         is_from_student=m.is_from_student,
         created_at=m.created_at
     ) for m in messages]
+
+
+# PDF upload endpoints
+@app.post("/materials/upload-pdf", response_model=PDFUploadResponse)
+async def upload_pdf_materials(
+    subject: str = Form(...),
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Загружает PDF файл с материалами по предмету в Qdrant
+
+    Args:
+        subject: Название предмета
+        file: PDF файл
+        current_user: Текущий пользователь
+        db: Сессия базы данных
+
+    Returns:
+        PDFUploadResponse: Информация о загруженном документе
+    """
+    # Проверяем, что файл - PDF
+    if not file.filename.endswith('.pdf'):
+        raise HTTPException(
+            status_code=400,
+            detail="File must be a PDF"
+        )
+
+    try:
+        # Парсим PDF
+        pdf_pages = await parse_pdf_from_file(file)
+
+        if not pdf_pages:
+            raise HTTPException(
+                status_code=400,
+                detail="PDF file is empty or could not be parsed"
+            )
+
+        # Сохраняем в Qdrant
+        document_ids = await save_pdf_to_qdrant(
+            subject=subject,
+            pdf_pages=pdf_pages,
+            metadata={
+                "uploaded_by": current_user.id,
+                "filename": file.filename,
+                "uploaded_at": datetime.now().isoformat()
+            }
+        )
+
+        # Подсчитываем количество чанков
+        from exam.pdf_parser import split_text_into_chunks
+        total_chunks = sum(len(split_text_into_chunks(
+            page, chunk_size=1000, overlap=200)) for page in pdf_pages)
+
+        return PDFUploadResponse(
+            subject=subject,
+            document_ids=document_ids,
+            pages_count=len(pdf_pages),
+            chunks_count=total_chunks,
+            message=f"Successfully uploaded {len(pdf_pages)} pages from PDF file"
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to upload PDF: {str(e)}"
+        )
+
+
+@app.post("/materials/upload-pdf-from-url", response_model=PDFUploadResponse)
+async def upload_pdf_from_url(
+    subject: str = Form(...),
+    pdf_url: str = Form(...),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Загружает PDF файл по URL с материалами по предмету в Qdrant
+
+    Args:
+        subject: Название предмета
+        pdf_url: URL PDF файла
+        current_user: Текущий пользователь
+        db: Сессия базы данных
+
+    Returns:
+        PDFUploadResponse: Информация о загруженном документе
+    """
+    try:
+        # Парсим PDF из URL
+        pdf_pages = await parse_pdf_from_url(pdf_url)
+
+        if not pdf_pages:
+            raise HTTPException(
+                status_code=400,
+                detail="PDF file is empty or could not be parsed"
+            )
+
+        # Сохраняем в Qdrant
+        document_ids = await save_pdf_to_qdrant(
+            subject=subject,
+            pdf_pages=pdf_pages,
+            metadata={
+                "uploaded_by": current_user.id,
+                "source_url": pdf_url,
+                "uploaded_at": datetime.now().isoformat()
+            }
+        )
+
+        # Подсчитываем количество чанков
+        from exam.pdf_parser import split_text_into_chunks
+        total_chunks = sum(len(split_text_into_chunks(
+            page, chunk_size=1000, overlap=200)) for page in pdf_pages)
+
+        return PDFUploadResponse(
+            subject=subject,
+            document_ids=document_ids,
+            pages_count=len(pdf_pages),
+            chunks_count=total_chunks,
+            message=f"Successfully uploaded {len(pdf_pages)} pages from PDF URL"
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to upload PDF from URL: {str(e)}"
+        )
