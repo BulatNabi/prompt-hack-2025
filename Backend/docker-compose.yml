@@ -1,0 +1,104 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: prompt-hack-backend
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    environment:
+      - QDRANT_HOST=qdrant
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-prompt_hack_db}
+      - ORIGINS=${ORIGINS:-http://localhost:3000,http://localhost:8000}
+    env_file:
+      - ./.env
+    restart: unless-stopped
+    working_dir: /app
+    networks:
+      - app-network
+    command: >
+      sh -c "
+        until pg_isready -h db -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-prompt_hack_db}; do
+          echo '⏳ Waiting for PostgreSQL...';
+          sleep 2;
+        done;
+        echo '✅ PostgreSQL ready!';
+        until curl -f http://qdrant:6333/healthz > /dev/null 2>&1; do
+          echo '⏳ Waiting for Qdrant...';
+          sleep 2;
+        done;
+        echo '✅ Qdrant ready! Running migrations...';
+        alembic upgrade head;
+        echo '✅ Migrations completed! Starting application...';
+        uvicorn main.endpoints:app --host 0.0.0.0 --port 8000;
+      "
+  frontend:
+    build:
+      context: ../Frontend
+      dockerfile: Dockerfile
+      args:
+        - VITE_API_URL=http://localhost:${APP_PORT:-8000}
+    container_name: prompt-hack-frontend
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    depends_on:
+      - app
+    restart: unless-stopped
+    networks:
+      - app-network
+  db:
+    image: postgres:17
+    container_name: prompt-hack-db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-prompt_hack_db}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    env_file:
+      - ./.env
+    restart: unless-stopped
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-prompt_hack_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: prompt-hack-qdrant
+    ports:
+      - "${QDRANT_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  postgres_data:
+    driver: local
+  qdrant_data:
+    driver: local
+
+networks:
+  app-network:
+    driver: bridge
